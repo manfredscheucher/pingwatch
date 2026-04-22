@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Reads ping_log.txt and creates a histogram of outages/high-latency events
-grouped by hour of day.
+Reads a ping_monitor log and creates a histogram of events grouped by hour.
 
-- A (router 192.168.0.1): red bars   — outages
-- B (DNS 8.8.8.8):         blue bars  — outages
-- C (DNS high latency):    orange bars — DNS pings > 100ms
+Events:
+- P (suspended):       black bars
+- A (router timeout):  purple bars
+- B (DNS timeout):     red bars
+- C (DNS high-lat):    orange bars
+- D (DNS IQR outlier): yellow bars
 
-Output: histogram.png (next to the log file)
-Usage: python3 ping_histogram.py [--log LOG_FILE] [--out OUTPUT_PNG]
+Only the hour range that actually contains data is shown.
+Usage: python3 ping_histogram.py LOG_FILE [--out OUTPUT_PNG]
 """
 
 import argparse
@@ -20,20 +22,19 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 
 
 def parse_log(log_path: str):
     """
-    Parses compact log format: "2026-04-21 14:32:17 A|B|C"
-    Returns three dicts: hour -> count for A, B, C events.
+    Parses log lines: "2026-04-21 14:32:17 P|A|B|C|D"
+    Returns five dicts (hour -> count) for P, A, B, C, D,
+    plus the min and max hour seen.
     """
-    a_counts: dict[int, int] = defaultdict(int)
-    b_counts: dict[int, int] = defaultdict(int)
-    c_counts: dict[int, int] = defaultdict(int)
+    counts = {k: defaultdict(int) for k in "PABCD"}
+    min_hour, max_hour = 23, 0
 
-    line_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+([ABC])$")
+    line_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+([PABCD])$")
 
     try:
         with open(log_path, "r") as f:
@@ -45,44 +46,52 @@ def parse_log(log_path: str):
                     ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     continue
-                hour = ts.hour
+                hour  = ts.hour
                 event = m.group(2)
-                if event == "A":
-                    a_counts[hour] += 1
-                elif event == "B":
-                    b_counts[hour] += 1
-                elif event == "C":
-                    c_counts[hour] += 1
+                counts[event][hour] += 1
+                if hour < min_hour:
+                    min_hour = hour
+                if hour > max_hour:
+                    max_hour = hour
 
     except FileNotFoundError:
         print(f"Log file not found: {log_path}")
-        return {}, {}, {}
+        return {k: {} for k in "PABCD"}, 0, 23
 
-    return dict(a_counts), dict(b_counts), dict(c_counts)
+    return {k: dict(v) for k, v in counts.items()}, min_hour, max_hour
 
 
-def make_histogram(a_outages, b_outages, c_high_latency, out_path: str):
-    hours = list(range(24))
-    a_vals = [a_outages.get(h, 0) for h in hours]
-    b_vals = [b_outages.get(h, 0) for h in hours]
-    c_vals = [c_high_latency.get(h, 0) for h in hours]
+def make_histogram(counts: dict, min_hour: int, max_hour: int, out_path: str,
+                   router: str = "", dns: str = ""):
+    hours = list(range(min_hour, max_hour + 1))
+    if not hours:
+        print("No data to plot.")
+        return
 
-    total_events = sum(a_vals) + sum(b_vals) + sum(c_vals)
+    p_vals = [counts["P"].get(h, 0) for h in hours]
+    a_vals = [counts["A"].get(h, 0) for h in hours]
+    b_vals = [counts["B"].get(h, 0) for h in hours]
+    d_vals = [counts["D"].get(h, 0) for h in hours]
+    c_vals = [counts["C"].get(h, 0) for h in hours]
 
-    x = np.arange(len(hours))
-    bar_width = 0.26
+    x         = np.arange(len(hours))
+    bar_width  = 0.16
+    offsets    = [-2, -1, 0, 1, 2]
 
-    fig, ax = plt.subplots(figsize=(16, 7))
+    fig, ax = plt.subplots(figsize=(max(8, len(hours) * 0.9), 7))
 
-    bars_a = ax.bar(x - bar_width, a_vals, bar_width, label="A – Router timeout (192.168.0.1)",
-                    color="#e74c3c", alpha=0.85, edgecolor="white", linewidth=0.5)
-    bars_b = ax.bar(x,             b_vals, bar_width, label="B – DNS timeout (8.8.8.8)",
-                    color="#e67e22", alpha=0.85, edgecolor="white", linewidth=0.5)
-    bars_c = ax.bar(x + bar_width, c_vals, bar_width, label="C – DNS high latency >100ms",
-                    color="#f1c40f", alpha=0.85, edgecolor="white", linewidth=0.5)
+    bar_groups = [
+        (p_vals, "#1a1a1a", "P – Suspended",              offsets[0]),
+        (a_vals, "#8e44ad", "A – Router timeout",          offsets[1]),
+        (b_vals, "#e74c3c", "B – DNS timeout",             offsets[2]),
+        (c_vals, "#e67e22", "C – DNS high latency >100ms", offsets[3]),
+        (d_vals, "#f1c40f", "D – DNS IQR outlier",         offsets[4]),
+    ]
 
-    # Value labels on top of bars
-    for bars in (bars_a, bars_b, bars_c):
+    for vals, color, label, offset in bar_groups:
+        bars = ax.bar(x + offset * bar_width, vals, bar_width,
+                      label=label, color=color, alpha=0.85,
+                      edgecolor="white", linewidth=0.5)
         for bar in bars:
             h = bar.get_height()
             if h > 0:
@@ -91,16 +100,27 @@ def make_histogram(a_outages, b_outages, c_high_latency, out_path: str):
 
     ax.set_xlabel("Hour of day", fontsize=12)
     ax.set_ylabel("Number of events", fontsize=12)
+    ip_info = ""
+    if router or dns:
+        parts = []
+        if router:
+            parts.append(f"Router: {router}")
+        if dns:
+            parts.append(f"DNS: {dns}")
+        ip_info = "\n" + "   |   ".join(parts)
+
     ax.set_title(
-        f"Network outage & high-latency histogram by hour\n"
-        f"A={sum(a_vals)} router timeouts   B={sum(b_vals)} DNS timeouts   "
-        f"C={sum(c_vals)} DNS high-latency",
+        f"Network event histogram by hour  "
+        f"({hours[0]:02d}:00 – {hours[-1]:02d}:59){ip_info}\n"
+        f"P={sum(p_vals)} suspended   A={sum(a_vals)} router   "
+        f"B={sum(b_vals)} DNS   C={sum(c_vals)} high-latency   D={sum(d_vals)} outlier",
         fontsize=13,
     )
     ax.set_xticks(x)
     ax.set_xticklabels([f"{h:02d}:00" for h in hours], rotation=45, ha="right", fontsize=9)
     ax.yaxis.get_major_locator().set_params(integer=True)
-    ax.set_ylim(0, max(max(a_vals), max(b_vals), max(c_vals), 1) * 1.2)
+    all_vals = p_vals + a_vals + b_vals + d_vals + c_vals
+    ax.set_ylim(0, max(max(all_vals), 1) * 1.2)
     ax.legend(fontsize=10, loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.4)
     ax.spines["top"].set_visible(False)
@@ -110,39 +130,45 @@ def make_histogram(a_outages, b_outages, c_high_latency, out_path: str):
     plt.savefig(out_path, dpi=150)
     plt.close()
     print(f"Histogram saved to: {out_path}")
-    print(f"Total: A={sum(a_vals)} router timeouts, B={sum(b_vals)} DNS timeouts, "
-          f"C={sum(c_vals)} DNS high-latency events")
+    print(f"Total: P={sum(p_vals)} suspended, A={sum(a_vals)} router, "
+          f"B={sum(b_vals)} DNS, C={sum(c_vals)} high-latency, D={sum(d_vals)} outlier")
 
 
-def print_summary(a_outages, b_outages, c_high_latency):
-    all_hours = sorted(set(list(a_outages) + list(b_outages) + list(c_high_latency)))
-    if not all_hours:
+def print_summary(counts: dict, min_hour: int, max_hour: int):
+    hours = list(range(min_hour, max_hour + 1))
+    if not hours:
         print("No events found in log.")
         return
-    print(f"\n{'Hour':>6}  {'A outages':>10}  {'B outages':>10}  {'C high-lat':>11}")
-    print("-" * 44)
-    for h in all_hours:
-        a = a_outages.get(h, 0)
-        b = b_outages.get(h, 0)
-        c = c_high_latency.get(h, 0)
-        print(f"  {h:02d}:00  {a:>10}  {b:>10}  {c:>11}")
+    print(f"\n{'Hour':>6}  {'P suspend':>10}  {'A router':>9}  {'B DNS':>7}  {'C high-lat':>11}  {'D outlier':>10}")
+    print("-" * 65)
+    for h in hours:
+        p = counts["P"].get(h, 0)
+        a = counts["A"].get(h, 0)
+        b = counts["B"].get(h, 0)
+        c = counts["C"].get(h, 0)
+        d = counts["D"].get(h, 0)
+        print(f"  {h:02d}:00  {p:>10}  {a:>9}  {b:>7}  {c:>11}  {d:>10}")
     print()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create ping outage histogram from log")
+    parser = argparse.ArgumentParser(description="Create ping event histogram from log")
     parser.add_argument("log", type=str, help="Log file to read")
     parser.add_argument("--out", "-o", type=str, default=None,
                         help="Output PNG path (default: <log_dir>/histogram.png)")
+    parser.add_argument("--router", type=str, default="",
+                        help="Router IP to show in chart (e.g. 192.168.0.1)")
+    parser.add_argument("--dns", type=str, default="",
+                        help="DNS IP to show in chart (e.g. 8.8.8.8)")
     args = parser.parse_args()
 
     log_path = args.log
     out_path = args.out or os.path.join(os.path.dirname(os.path.abspath(log_path)), "histogram.png")
 
     print(f"Reading log: {log_path}")
-    a_outages, b_outages, c_high_latency = parse_log(log_path)
-    print_summary(a_outages, b_outages, c_high_latency)
-    make_histogram(a_outages, b_outages, c_high_latency, out_path)
+    counts, min_hour, max_hour = parse_log(log_path)
+    print_summary(counts, min_hour, max_hour)
+    make_histogram(counts, min_hour, max_hour, out_path, router=args.router, dns=args.dns)
 
 
 if __name__ == "__main__":
