@@ -94,7 +94,8 @@ def make_histogram(counts: dict, min_hour: int, max_hour: int, out_path: str,
 
     for vals, color, label, offset in bar_groups:
         bars = ax.bar(x + offset * bar_width, vals, bar_width,
-                      label=label, color=color, alpha=0.85,
+                      label=label if sum(vals) > 0 else None,
+                      color=color, alpha=0.85,
                       edgecolor="white", linewidth=0.5)
         for bar in bars:
             h = bar.get_height()
@@ -111,16 +112,23 @@ def make_histogram(counts: dict, min_hour: int, max_hour: int, out_path: str,
 
     ax.set_xlabel("Hour of day", fontsize=12)
     ax.set_ylabel("Number of events", fontsize=12)
+    all_vals = s_vals + rt_vals + dt_vals
+    label_map = [
+        (s_vals,  "S",  "suspended"),
+        (rt_vals, "RT", "router-timeout"),
+        (dt_vals, "DT", "dns-timeout"),
+    ]
     if show_outliers:
-        summary = (f"S={sum(s_vals)} suspended   "
-                   f"RT={sum(rt_vals)} router-timeout   RO={sum(ro_vals)} router-outlier   "
-                   f"DT={sum(dt_vals)} dns-timeout   DO={sum(do_vals)} dns-outlier")
-        all_vals = s_vals + rt_vals + ro_vals + dt_vals + do_vals
-    else:
-        summary = (f"S={sum(s_vals)} suspended   "
-                   f"RT={sum(rt_vals)} router-timeout   "
-                   f"DT={sum(dt_vals)} dns-timeout")
-        all_vals = s_vals + rt_vals + dt_vals
+        all_vals += ro_vals + do_vals
+        label_map += [
+            (ro_vals, "RO", "router-outlier"),
+            (do_vals, "DO", "dns-outlier"),
+        ]
+    summary = "   ".join(
+        f"{tag}={sum(vals)} {name}"
+        for vals, tag, name in label_map
+        if sum(vals) > 0
+    )
 
     ax.set_title(
         f"Network event histogram by hour  "
