@@ -44,14 +44,20 @@ PRIORITY = {"RT": 5, "RO": 4, "DT": 3, "DO": 2}
 
 def detect_router() -> str | None:
     try:
-        if sys.platform == "darwin":
+        if sys.platform == "darwin":          # macOS
             out = subprocess.check_output(["route", "-n", "get", "default"],
                                           text=True, timeout=3)
             m = re.search(r"gateway:\s+([\d.]+)", out)
-        else:
+        elif sys.platform.startswith("linux"): # Linux
             out = subprocess.check_output(["ip", "route", "show", "default"],
                                           text=True, timeout=3)
             m = re.search(r"default via ([\d.]+)", out)
+        elif sys.platform == "win32":          # Windows
+            out = subprocess.check_output(["route", "print", "0.0.0.0"],
+                                          text=True, timeout=3)
+            m = re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", out)
+        else:
+            return None
         return m.group(1) if m else None
     except Exception:
         return None
@@ -59,11 +65,13 @@ def detect_router() -> str | None:
 
 def ping_host(host: str, timeout_s: int = 1) -> tuple[bool, float | None]:
     try:
-        w = str(timeout_s * 1000) if sys.platform == "darwin" else str(timeout_s)
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", w, host],
-            capture_output=True, text=True, timeout=timeout_s + 1,
-        )
+        if sys.platform == "darwin":           # macOS: -W in milliseconds
+            cmd = ["ping", "-c", "1", "-W", str(timeout_s * 1000), host]
+        elif sys.platform.startswith("linux"): # Linux: -W in seconds
+            cmd = ["ping", "-c", "1", "-W", str(timeout_s), host]
+        else:                                  # Windows: -n count, -w in milliseconds
+            cmd = ["ping", "-n", "1", "-w", str(timeout_s * 1000), host]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 1)
         if result.returncode == 0:
             m = re.search(r"time[=<]([\d.]+)\s*ms", result.stdout)
             return True, float(m.group(1)) if m else None
