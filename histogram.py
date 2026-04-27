@@ -24,15 +24,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 EVENTS = ["S", "RT", "RO", "DT", "DO"]
-LINE_PAT = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):\d{2}:\d{2}\s+(S|RT|RO|DT|DO)$")
+LINE_PAT = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):\d{2}\s+(S|RT|RO|DT|DO)$")
 
 
 def parse_log(log_path: str):
     """
-    Returns a dict: date_str -> {event -> {hour -> count}}
-    and also a combined entry under key None for the overall view.
+    Returns (by_day, first_ts, last_ts) where:
+      by_day   : date_str -> {event -> {hour -> count}}
+      first_ts : "YYYY-MM-DD HH:MM" of first event
+      last_ts  : "YYYY-MM-DD HH:MM" of last event
     """
     by_day = {}  # "2026-04-22" -> {event -> {hour -> count}}
+    first_ts = None
+    last_ts  = None
 
     try:
         with open(log_path, "r") as f:
@@ -40,25 +44,31 @@ def parse_log(log_path: str):
                 m = LINE_PAT.match(line.strip())
                 if not m:
                     continue
-                date_str, hour_str, event = m.group(1), m.group(2), m.group(3)
+                date_str, hour_str, min_str, event = m.group(1), m.group(2), m.group(3), m.group(4)
                 hour = int(hour_str)
+                ts = f"{date_str} {hour_str}:{min_str}"
+                if first_ts is None:
+                    first_ts = ts
+                last_ts = ts
                 if date_str not in by_day:
                     by_day[date_str] = {k: defaultdict(int) for k in EVENTS}
                 by_day[date_str][event][hour] += 1
 
     except FileNotFoundError:
         print(f"Log file not found: {log_path}")
-        return {}
+        return {}, None, None
 
     # Convert inner defaultdicts to plain dicts
-    return {
+    result = {
         date: {ev: dict(hours) for ev, hours in events.items()}
         for date, events in sorted(by_day.items())
     }
+    return result, first_ts, last_ts
 
 
 def make_histogram(date_str: str, counts: dict, out_path: str,
-                   router: str = "", dns: str = "", show_outliers: bool = False):
+                   router: str = "", dns: str = "", show_outliers: bool = False,
+                   first_ts: str = None, last_ts: str = None):
     hours_with_data = set()
     for ev in EVENTS:
         hours_with_data.update(counts[ev].keys())
@@ -135,8 +145,10 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
     if show_outliers:
         all_vals += ro_vals + do_vals
 
+    start_label = first_ts.split(" ")[1] if first_ts else f"{hours[0]:02d}:00"
+    end_label   = last_ts.split(" ")[1]  if last_ts  else f"{hours[-1]:02d}:59"
     ax.set_title(
-        f"{ip_info}{date_str}  —  {hours[0]:02d}:00 – {hours[-1]:02d}:59\n{summary}",
+        f"{ip_info}{date_str}  —  {start_label} – {end_label}\n{summary}",
         fontsize=12,
     )
     ax.set_xlabel("Hour of day", fontsize=12)
@@ -157,7 +169,8 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
 
 
 def make_histogram_combined(by_day: dict, out_path: str,
-                            router: str = "", dns: str = "", show_outliers: bool = False):
+                            router: str = "", dns: str = "", show_outliers: bool = False,
+                            first_ts: str = None, last_ts: str = None):
     """Combined plot with (date, hour) pairs on X-axis, preserving per-day order."""
     # Build ordered list of (date, hour) slots
     slots = []
@@ -254,8 +267,10 @@ def make_histogram_combined(by_day: dict, out_path: str,
 
     all_vals = s_vals + rt_vals + dt_vals + (ro_vals + do_vals if show_outliers else [])
 
+    start_label = first_ts if first_ts else all_dates[0]
+    end_label   = last_ts  if last_ts  else all_dates[-1]
     ax.set_title(
-        f"{ip_info}{all_dates[0]} – {all_dates[-1]}\n{summary}",
+        f"{ip_info}{start_label} – {end_label}\n{summary}",
         fontsize=12,
     )
     ax.set_xlabel("Date / Hour", fontsize=12)
@@ -276,7 +291,8 @@ def make_histogram_combined(by_day: dict, out_path: str,
 
 
 def make_histogram_stacked(by_day: dict, out_path: str,
-                           router: str = "", dns: str = "", show_outliers: bool = False):
+                           router: str = "", dns: str = "", show_outliers: bool = False,
+                           first_ts: str = None, last_ts: str = None):
     """One subplot per day, all with the same X-axis 0–23."""
     days = sorted(by_day.keys())
     n = len(days)
@@ -301,7 +317,7 @@ def make_histogram_stacked(by_day: dict, out_path: str,
     hours = list(range(24))
     x = np.arange(24)
 
-    fig, axes = plt.subplots(n, 1, figsize=(18, 4 * n), sharex=True)
+    fig, axes = plt.subplots(n, 1, figsize=(18, 4 * n), sharex=False)
     if n == 1:
         axes = [axes]
 
@@ -340,6 +356,21 @@ def make_histogram_stacked(by_day: dict, out_path: str,
                 summary_parts.append(f"{ev}={total}")
         summary = "   ".join(summary_parts)
 
+        # X-axis: hours with data for this day in normal color, others as "--:--" in grey
+        hours_with_data = set()
+        for ev in EVENTS:
+            hours_with_data.update(counts[ev].keys())
+        xticklabels = [
+            f"{h:02d}:00" if h in hours_with_data else "--:--"
+            for h in hours
+        ]
+        ax.set_xticks(x)
+        ax.set_xticklabels(xticklabels, rotation=45, ha="right", fontsize=9)
+        for tick, lbl in zip(ax.get_xticklabels(), xticklabels):
+            if lbl == "--:--":
+                tick.set_color("#bbbbbb")
+        ax.set_xlabel("Hour of day", fontsize=9)
+
         ax.set_title(f"{date_str}   {summary}", fontsize=11, loc="left")
         ax.set_ylabel("Events", fontsize=9)
         ax.set_ylim(0, max(max_val, 1) * 1.25)
@@ -352,11 +383,9 @@ def make_histogram_stacked(by_day: dict, out_path: str,
             ax.legend(fontsize=9, loc="upper right")
             legend_added = True
 
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels([f"{h:02d}:00" for h in hours], rotation=45, ha="right", fontsize=9)
-    axes[-1].set_xlabel("Hour of day", fontsize=11)
-
-    title = f"{days[0]} – {days[-1]}"
+    start_label = first_ts if first_ts else days[0]
+    end_label   = last_ts  if last_ts  else days[-1]
+    title = f"{start_label} – {end_label}"
     if ip_info:
         title = ip_info + "\n" + title
     fig.suptitle(title, fontsize=13, y=1.01)
@@ -410,14 +439,15 @@ def main():
     log_dir  = os.path.dirname(os.path.abspath(log_path))
 
     print(f"Reading log: {log_path}")
-    by_day = parse_log(log_path)
+    by_day, first_ts, last_ts = parse_log(log_path)
     if not by_day:
         print("No events found.")
         return
 
     print_summary(by_day)
 
-    kwargs = dict(router=args.router, dns=args.dns, show_outliers=args.outliers)
+    kwargs = dict(router=args.router, dns=args.dns, show_outliers=args.outliers,
+                  first_ts=first_ts, last_ts=last_ts)
 
     if args.mode == "split":
         for date_str, counts in by_day.items():
