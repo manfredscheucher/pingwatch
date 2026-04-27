@@ -91,18 +91,18 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
     if show_outliers:
         bar_width = 0.16
         bar_groups = [
-            (s_vals,  "#1a1a1a", "S  – Suspended",          -2),
-            (rt_vals, "#8e44ad", "RT – Router timeout",      -1),
-            (ro_vals, "#ff69b4", "RO – Router IQR outlier",   0),
-            (dt_vals, "#e74c3c", "DT – DNS timeout",          1),
-            (do_vals, "#e67e22", "DO – DNS IQR outlier",      2),
+            (s_vals,  "#1a1a1a", "Suspended",          -2),
+            (rt_vals, "#8e44ad", "Router timeout",      -1),
+            (ro_vals, "#ff69b4", "Router outlier",   0),
+            (dt_vals, "#e74c3c", "DNS timeout",          1),
+            (do_vals, "#e67e22", "DNS outlier",      2),
         ]
     else:
         bar_width = 0.25
         bar_groups = [
-            (s_vals,  "#1a1a1a", "S  – Suspended",      -1),
-            (rt_vals, "#8e44ad", "RT – Router timeout",   0),
-            (dt_vals, "#e74c3c", "DT – DNS timeout",      1),
+            (s_vals,  "#1a1a1a", "Suspended",      -1),
+            (rt_vals, "#8e44ad", "Router timeout",   0),
+            (dt_vals, "#e74c3c", "DNS timeout",      1),
         ]
 
     fig, ax = plt.subplots(figsize=(max(8, len(hours) * 0.9), 7))
@@ -201,18 +201,18 @@ def make_histogram_combined(by_day: dict, out_path: str,
     if show_outliers:
         bar_width = 0.16
         bar_groups = [
-            (s_vals,  "#1a1a1a", "S  – Suspended",          -2),
-            (rt_vals, "#8e44ad", "RT – Router timeout",      -1),
-            (ro_vals, "#ff69b4", "RO – Router IQR outlier",   0),
-            (dt_vals, "#e74c3c", "DT – DNS timeout",          1),
-            (do_vals, "#e67e22", "DO – DNS IQR outlier",      2),
+            (s_vals,  "#1a1a1a", "Suspended",          -2),
+            (rt_vals, "#8e44ad", "Router timeout",      -1),
+            (ro_vals, "#ff69b4", "Router outlier",   0),
+            (dt_vals, "#e74c3c", "DNS timeout",          1),
+            (do_vals, "#e67e22", "DNS outlier",      2),
         ]
     else:
         bar_width = 0.25
         bar_groups = [
-            (s_vals,  "#1a1a1a", "S  – Suspended",      -1),
-            (rt_vals, "#8e44ad", "RT – Router timeout",   0),
-            (dt_vals, "#e74c3c", "DT – DNS timeout",      1),
+            (s_vals,  "#1a1a1a", "Suspended",      -1),
+            (rt_vals, "#8e44ad", "Router timeout",   0),
+            (dt_vals, "#e74c3c", "DNS timeout",      1),
         ]
 
     fig, ax = plt.subplots(figsize=(max(8, len(slots) * 0.6), 7))
@@ -300,18 +300,18 @@ def make_histogram_stacked(by_day: dict, out_path: str,
     if show_outliers:
         bar_width = 0.16
         bar_groups_def = [
-            ("S",  "#1a1a1a", "S  – Suspended",         -2),
-            ("RT", "#8e44ad", "RT – Router timeout",     -1),
-            ("RO", "#ff69b4", "RO – Router IQR outlier",  0),
-            ("DT", "#e74c3c", "DT – DNS timeout",         1),
-            ("DO", "#e67e22", "DO – DNS IQR outlier",     2),
+            ("S",  "#1a1a1a", "Suspended",         -2),
+            ("RT", "#8e44ad", "Router timeout",     -1),
+            ("RO", "#ff69b4", "Router outlier",  0),
+            ("DT", "#e74c3c", "DNS timeout",         1),
+            ("DO", "#e67e22", "DNS outlier",     2),
         ]
     else:
         bar_width = 0.25
         bar_groups_def = [
-            ("S",  "#1a1a1a", "S  – Suspended",     -1),
-            ("RT", "#8e44ad", "RT – Router timeout",  0),
-            ("DT", "#e74c3c", "DT – DNS timeout",     1),
+            ("S",  "#1a1a1a", "Suspended",     -1),
+            ("RT", "#8e44ad", "Router timeout",  0),
+            ("DT", "#e74c3c", "DNS timeout",     1),
         ]
 
     hours = list(range(24))
