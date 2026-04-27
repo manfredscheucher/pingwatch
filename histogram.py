@@ -275,6 +275,98 @@ def make_histogram_combined(by_day: dict, out_path: str,
     print(f"  combined → {out_path}")
 
 
+def make_histogram_stacked(by_day: dict, out_path: str,
+                           router: str = "", dns: str = "", show_outliers: bool = False):
+    """One subplot per day, all with the same X-axis 0–23."""
+    days = sorted(by_day.keys())
+    n = len(days)
+
+    if show_outliers:
+        bar_width = 0.16
+        bar_groups_def = [
+            ("S",  "#1a1a1a", "S  – Suspended",         -2),
+            ("RT", "#8e44ad", "RT – Router timeout",     -1),
+            ("RO", "#ff69b4", "RO – Router IQR outlier",  0),
+            ("DT", "#e74c3c", "DT – DNS timeout",         1),
+            ("DO", "#e67e22", "DO – DNS IQR outlier",     2),
+        ]
+    else:
+        bar_width = 0.25
+        bar_groups_def = [
+            ("S",  "#1a1a1a", "S  – Suspended",     -1),
+            ("RT", "#8e44ad", "RT – Router timeout",  0),
+            ("DT", "#e74c3c", "DT – DNS timeout",     1),
+        ]
+
+    hours = list(range(24))
+    x = np.arange(24)
+
+    fig, axes = plt.subplots(n, 1, figsize=(18, 4 * n), sharex=True)
+    if n == 1:
+        axes = [axes]
+
+    ip_info = ""
+    if router or dns:
+        parts = []
+        if router: parts.append(f"Router: {router}")
+        if dns:    parts.append(f"DNS: {dns}")
+        ip_info = "   |   ".join(parts)
+
+    legend_added = False
+
+    for ax, date_str in zip(axes, days):
+        counts = by_day[date_str]
+        max_val = 0
+
+        for ev, color, label, offset in bar_groups_def:
+            vals = [counts[ev].get(h, 0) for h in hours]
+            total = sum(vals)
+            bars = ax.bar(x + offset * bar_width, vals, bar_width,
+                          label=label if (not legend_added and total > 0) else None,
+                          color=color, alpha=0.85,
+                          edgecolor="white", linewidth=0.5)
+            max_val = max(max_val, max(vals))
+            for bar in bars:
+                h = bar.get_height()
+                if h > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2., h + 0.1,
+                            str(int(h)), ha="center", va="bottom", fontsize=7, color="#333")
+
+        evs_shown = ["S", "RT", "DT"] + (["RO", "DO"] if show_outliers else [])
+        summary_parts = []
+        for ev in evs_shown:
+            total = sum(counts[ev].values())
+            if total > 0:
+                summary_parts.append(f"{ev}={total}")
+        summary = "   ".join(summary_parts)
+
+        ax.set_title(f"{date_str}   {summary}", fontsize=11, loc="left")
+        ax.set_ylabel("Events", fontsize=9)
+        ax.set_ylim(0, max(max_val, 1) * 1.25)
+        ax.yaxis.get_major_locator().set_params(integer=True)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if not legend_added:
+            ax.legend(fontsize=9, loc="upper right")
+            legend_added = True
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels([f"{h:02d}:00" for h in hours], rotation=45, ha="right", fontsize=9)
+    axes[-1].set_xlabel("Hour of day", fontsize=11)
+
+    title = f"{days[0]} – {days[-1]}"
+    if ip_info:
+        title = ip_info + "\n" + title
+    fig.suptitle(title, fontsize=13, y=1.01)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  stacked ({n} days) → {out_path}")
+
+
 def print_summary(by_day: dict):
     for date_str, counts in by_day.items():
         hours_with_data = set()
@@ -307,8 +399,11 @@ def main():
                         help="DNS IP to show in chart (e.g. 8.8.8.8)")
     parser.add_argument("--outliers", action="store_true", default=False,
                         help="Also plot RO and DO outlier bars (default: hidden)")
-    parser.add_argument("--per-day", action="store_true", default=False,
-                        help="Create one PNG per day (named histogram_YYYY-MM-DD.png)")
+    parser.add_argument("--mode", "-m", choices=["combined", "stacked", "split"],
+                        default="stacked",
+                        help="stacked: one subplot per day, hours 0–23 aligned (default); "
+                             "combined: all days in one row; "
+                             "split: one PNG file per day")
     args = parser.parse_args()
 
     log_path = args.log
@@ -324,10 +419,13 @@ def main():
 
     kwargs = dict(router=args.router, dns=args.dns, show_outliers=args.outliers)
 
-    if args.per_day:
+    if args.mode == "split":
         for date_str, counts in by_day.items():
             out_path = os.path.join(log_dir, f"histogram_{date_str}.png")
             make_histogram(date_str, counts, out_path, **kwargs)
+    elif args.mode == "stacked":
+        out_path = args.out or os.path.join(log_dir, "histogram.png")
+        make_histogram_stacked(by_day, out_path, **kwargs)
     else:
         all_dates = sorted(by_day.keys())
         out_path = args.out or os.path.join(log_dir, "histogram.png")
