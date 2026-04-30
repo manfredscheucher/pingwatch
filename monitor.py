@@ -176,7 +176,7 @@ def is_iqr_outlier(val: float, q1: float, q3: float, n: int) -> bool:
     if n < IQR_MIN_SAMPLES:
         return False
     iqr = q3 - q1
-    return iqr > 0 and (val < q1 - 1.5 * iqr or val > q3 + 1.5 * iqr)
+    return iqr > 0 and val > q3 + 1.5 * iqr
 
 
 def fmt_stats(avg: float, med: float, sd: float, n: int) -> str:
