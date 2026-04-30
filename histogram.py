@@ -3,13 +3,13 @@
 Reads a ping_monitor log and creates a histogram of events grouped by hour.
 
 Events:
-- S  (suspended):        black bars
-- RT (router timeout):   purple bars
-- RO (router outlier):   pink bars
-- DT (DNS timeout):      red bars
-- DO (DNS outlier):      orange bars
+- S  (suspended):         black bars
+- LT (local timeout):     purple bars
+- LO (local outlier):     pink bars
+- GT (gateway timeout):   red bars
+- GO (gateway outlier):   orange bars
 
-Usage: python3 ping_histogram.py LOG_FILE [--out OUTPUT_PNG] [--outliers] [--per-day]
+Usage: python3 histogram.py LOG_FILE [--out OUTPUT_PNG] [--outliers] [--mode stacked|combined|split]
 """
 
 import argparse
@@ -23,8 +23,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-EVENTS = ["S", "RT", "RO", "DT", "DO"]
-LINE_PAT = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):\d{2}\s+(S|RT|RO|DT|DO)$")
+EVENTS = ["S", "LT", "LO", "GT", "GO"]
+# Accept both old (RT/RO/DT/DO) and new (LT/LO/GT/GO) log formats
+LINE_PAT = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):\d{2}\s+(S|[LRGD][TO])$")
+
+# Map old event codes to new ones
+EVENT_ALIAS = {
+    "RT": "LT", "RO": "LO",
+    "DT": "GT", "DO": "GO",
+}
 
 
 def parse_log(log_path: str):
@@ -34,7 +41,7 @@ def parse_log(log_path: str):
       first_ts : "YYYY-MM-DD HH:MM" of first event
       last_ts  : "YYYY-MM-DD HH:MM" of last event
     """
-    by_day = {}  # "2026-04-22" -> {event -> {hour -> count}}
+    by_day = {}
     first_ts = None
     last_ts  = None
 
@@ -45,6 +52,7 @@ def parse_log(log_path: str):
                 if not m:
                     continue
                 date_str, hour_str, min_str, event = m.group(1), m.group(2), m.group(3), m.group(4)
+                event = EVENT_ALIAS.get(event, event)
                 hour = int(hour_str)
                 ts = f"{date_str} {hour_str}:{min_str}"
                 if first_ts is None:
@@ -58,7 +66,6 @@ def parse_log(log_path: str):
         print(f"Log file not found: {log_path}")
         return {}, None, None
 
-    # Convert inner defaultdicts to plain dicts
     result = {
         date: {ev: dict(hours) for ev, hours in events.items()}
         for date, events in sorted(by_day.items())
@@ -67,7 +74,7 @@ def parse_log(log_path: str):
 
 
 def make_histogram(date_str: str, counts: dict, out_path: str,
-                   router: str = "", dns: str = "", show_outliers: bool = False,
+                   local: str = "", gateway: str = "", show_outliers: bool = False,
                    first_ts: str = None, last_ts: str = None):
     hours_with_data = set()
     for ev in EVENTS:
@@ -81,28 +88,28 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
     hours = list(range(min_hour, max_hour + 1))
 
     s_vals  = [counts["S"].get(h, 0)  for h in hours]
-    rt_vals = [counts["RT"].get(h, 0) for h in hours]
-    ro_vals = [counts["RO"].get(h, 0) for h in hours]
-    dt_vals = [counts["DT"].get(h, 0) for h in hours]
-    do_vals = [counts["DO"].get(h, 0) for h in hours]
+    lt_vals = [counts["LT"].get(h, 0) for h in hours]
+    lo_vals = [counts["LO"].get(h, 0) for h in hours]
+    gt_vals = [counts["GT"].get(h, 0) for h in hours]
+    go_vals = [counts["GO"].get(h, 0) for h in hours]
 
     x = np.arange(len(hours))
 
     if show_outliers:
         bar_width = 0.16
         bar_groups = [
-            (s_vals,  "#1a1a1a", "Suspended",          -2),
-            (rt_vals, "#8e44ad", "Router timeout",      -1),
-            (ro_vals, "#ff69b4", "Router outlier",   0),
-            (dt_vals, "#e74c3c", "DNS timeout",          1),
-            (do_vals, "#e67e22", "DNS outlier",      2),
+            (s_vals,  "#1a1a1a", "Suspended",         -2),
+            (lt_vals, "#8e44ad", "Local timeout",      -1),
+            (lo_vals, "#ff69b4", "Local outlier",       0),
+            (gt_vals, "#e74c3c", "Gateway timeout",     1),
+            (go_vals, "#e67e22", "Gateway outlier",     2),
         ]
     else:
         bar_width = 0.25
         bar_groups = [
-            (s_vals,  "#1a1a1a", "Suspended",      -1),
-            (rt_vals, "#8e44ad", "Router timeout",   0),
-            (dt_vals, "#e74c3c", "DNS timeout",      1),
+            (s_vals,  "#1a1a1a", "Suspended",        -1),
+            (lt_vals, "#8e44ad", "Local timeout",      0),
+            (gt_vals, "#e74c3c", "Gateway timeout",    1),
         ]
 
     fig, ax = plt.subplots(figsize=(max(8, len(hours) * 0.9), 7))
@@ -119,21 +126,21 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
                         str(int(h)), ha="center", va="bottom", fontsize=7, color="#333")
 
     ip_info = ""
-    if router or dns:
+    if local or gateway:
         parts = []
-        if router: parts.append(f"Router: {router}")
-        if dns:    parts.append(f"DNS: {dns}")
+        if local:   parts.append(f"Local: {local}")
+        if gateway: parts.append(f"Gateway: {gateway}")
         ip_info = "   |   ".join(parts) + "\n"
 
     label_map = [
         (s_vals,  "S",  "suspended"),
-        (rt_vals, "RT", "router-timeout"),
-        (dt_vals, "DT", "dns-timeout"),
+        (lt_vals, "LT", "local-timeout"),
+        (gt_vals, "GT", "gateway-timeout"),
     ]
     if show_outliers:
         label_map += [
-            (ro_vals, "RO", "router-outlier"),
-            (do_vals, "DO", "dns-outlier"),
+            (lo_vals, "LO", "local-outlier"),
+            (go_vals, "GO", "gateway-outlier"),
         ]
     summary = "   ".join(
         f"{tag}={sum(vals)} {name}"
@@ -141,9 +148,9 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
         if sum(vals) > 0
     )
 
-    all_vals = s_vals + rt_vals + dt_vals
+    all_vals = s_vals + lt_vals + gt_vals
     if show_outliers:
-        all_vals += ro_vals + do_vals
+        all_vals += lo_vals + go_vals
 
     start_label = first_ts.split(" ")[1] if first_ts else f"{hours[0]:02d}:00"
     end_label   = last_ts.split(" ")[1]  if last_ts  else f"{hours[-1]:02d}:59"
@@ -169,10 +176,9 @@ def make_histogram(date_str: str, counts: dict, out_path: str,
 
 
 def make_histogram_combined(by_day: dict, out_path: str,
-                            router: str = "", dns: str = "", show_outliers: bool = False,
+                            local: str = "", gateway: str = "", show_outliers: bool = False,
                             first_ts: str = None, last_ts: str = None):
     """Combined plot with (date, hour) pairs on X-axis, preserving per-day order."""
-    # Build ordered list of (date, hour) slots
     slots = []
     for date_str, counts in sorted(by_day.items()):
         hours_with_data = set()
@@ -191,28 +197,28 @@ def make_histogram_combined(by_day: dict, out_path: str,
         return by_day[date_str][ev].get(hour, 0)
 
     s_vals  = [get_val("S",  d, h) for d, h in slots]
-    rt_vals = [get_val("RT", d, h) for d, h in slots]
-    ro_vals = [get_val("RO", d, h) for d, h in slots]
-    dt_vals = [get_val("DT", d, h) for d, h in slots]
-    do_vals = [get_val("DO", d, h) for d, h in slots]
+    lt_vals = [get_val("LT", d, h) for d, h in slots]
+    lo_vals = [get_val("LO", d, h) for d, h in slots]
+    gt_vals = [get_val("GT", d, h) for d, h in slots]
+    go_vals = [get_val("GO", d, h) for d, h in slots]
 
     x = np.arange(len(slots))
 
     if show_outliers:
         bar_width = 0.16
         bar_groups = [
-            (s_vals,  "#1a1a1a", "Suspended",          -2),
-            (rt_vals, "#8e44ad", "Router timeout",      -1),
-            (ro_vals, "#ff69b4", "Router outlier",   0),
-            (dt_vals, "#e74c3c", "DNS timeout",          1),
-            (do_vals, "#e67e22", "DNS outlier",      2),
+            (s_vals,  "#1a1a1a", "Suspended",         -2),
+            (lt_vals, "#8e44ad", "Local timeout",      -1),
+            (lo_vals, "#ff69b4", "Local outlier",       0),
+            (gt_vals, "#e74c3c", "Gateway timeout",     1),
+            (go_vals, "#e67e22", "Gateway outlier",     2),
         ]
     else:
         bar_width = 0.25
         bar_groups = [
-            (s_vals,  "#1a1a1a", "Suspended",      -1),
-            (rt_vals, "#8e44ad", "Router timeout",   0),
-            (dt_vals, "#e74c3c", "DNS timeout",      1),
+            (s_vals,  "#1a1a1a", "Suspended",        -1),
+            (lt_vals, "#8e44ad", "Local timeout",      0),
+            (gt_vals, "#e74c3c", "Gateway timeout",    1),
         ]
 
     fig, ax = plt.subplots(figsize=(max(8, len(slots) * 0.6), 7))
@@ -228,7 +234,6 @@ def make_histogram_combined(by_day: dict, out_path: str,
                 ax.text(bar.get_x() + bar.get_width() / 2., h + 0.15,
                         str(int(h)), ha="center", va="bottom", fontsize=7, color="#333")
 
-    # X-axis labels: show date only at first hour of each day
     tick_labels = []
     for i, (date_str, hour) in enumerate(slots):
         if i == 0 or slots[i - 1][0] != date_str:
@@ -236,28 +241,27 @@ def make_histogram_combined(by_day: dict, out_path: str,
         else:
             tick_labels.append(f"{hour:02d}:00")
 
-    # Draw vertical line between days
     for i in range(1, len(slots)):
         if slots[i][0] != slots[i - 1][0]:
             ax.axvline(x=i - 0.5, color="#aaa", linestyle="--", linewidth=0.8)
 
     ip_info = ""
-    if router or dns:
+    if local or gateway:
         parts = []
-        if router: parts.append(f"Router: {router}")
-        if dns:    parts.append(f"DNS: {dns}")
+        if local:   parts.append(f"Local: {local}")
+        if gateway: parts.append(f"Gateway: {gateway}")
         ip_info = "   |   ".join(parts) + "\n"
 
     all_dates = sorted(by_day.keys())
     label_map = [
         (s_vals,  "S",  "suspended"),
-        (rt_vals, "RT", "router-timeout"),
-        (dt_vals, "DT", "dns-timeout"),
+        (lt_vals, "LT", "local-timeout"),
+        (gt_vals, "GT", "gateway-timeout"),
     ]
     if show_outliers:
         label_map += [
-            (ro_vals, "RO", "router-outlier"),
-            (do_vals, "DO", "dns-outlier"),
+            (lo_vals, "LO", "local-outlier"),
+            (go_vals, "GO", "gateway-outlier"),
         ]
     summary = "   ".join(
         f"{tag}={sum(vals)} {name}"
@@ -265,7 +269,7 @@ def make_histogram_combined(by_day: dict, out_path: str,
         if sum(vals) > 0
     )
 
-    all_vals = s_vals + rt_vals + dt_vals + (ro_vals + do_vals if show_outliers else [])
+    all_vals = s_vals + lt_vals + gt_vals + (lo_vals + go_vals if show_outliers else [])
 
     start_label = first_ts if first_ts else all_dates[0]
     end_label   = last_ts  if last_ts  else all_dates[-1]
@@ -291,7 +295,7 @@ def make_histogram_combined(by_day: dict, out_path: str,
 
 
 def make_histogram_stacked(by_day: dict, out_path: str,
-                           router: str = "", dns: str = "", show_outliers: bool = False,
+                           local: str = "", gateway: str = "", show_outliers: bool = False,
                            first_ts: str = None, last_ts: str = None):
     """One subplot per day, all with the same X-axis 0–23."""
     days = sorted(by_day.keys())
@@ -301,17 +305,17 @@ def make_histogram_stacked(by_day: dict, out_path: str,
         bar_width = 0.16
         bar_groups_def = [
             ("S",  "#1a1a1a", "Suspended",         -2),
-            ("RT", "#8e44ad", "Router timeout",     -1),
-            ("RO", "#ff69b4", "Router outlier",  0),
-            ("DT", "#e74c3c", "DNS timeout",         1),
-            ("DO", "#e67e22", "DNS outlier",     2),
+            ("LT", "#8e44ad", "Local timeout",      -1),
+            ("LO", "#ff69b4", "Local outlier",       0),
+            ("GT", "#e74c3c", "Gateway timeout",     1),
+            ("GO", "#e67e22", "Gateway outlier",     2),
         ]
     else:
         bar_width = 0.25
         bar_groups_def = [
-            ("S",  "#1a1a1a", "Suspended",     -1),
-            ("RT", "#8e44ad", "Router timeout",  0),
-            ("DT", "#e74c3c", "DNS timeout",     1),
+            ("S",  "#1a1a1a", "Suspended",        -1),
+            ("LT", "#8e44ad", "Local timeout",      0),
+            ("GT", "#e74c3c", "Gateway timeout",    1),
         ]
 
     hours = list(range(24))
@@ -322,10 +326,10 @@ def make_histogram_stacked(by_day: dict, out_path: str,
         axes = [axes]
 
     ip_info = ""
-    if router or dns:
+    if local or gateway:
         parts = []
-        if router: parts.append(f"Router: {router}")
-        if dns:    parts.append(f"DNS: {dns}")
+        if local:   parts.append(f"Local: {local}")
+        if gateway: parts.append(f"Gateway: {gateway}")
         ip_info = "   |   ".join(parts)
 
     legend_added = False
@@ -348,7 +352,7 @@ def make_histogram_stacked(by_day: dict, out_path: str,
                     ax.text(bar.get_x() + bar.get_width() / 2., h + 0.1,
                             str(int(h)), ha="center", va="bottom", fontsize=7, color="#333")
 
-        evs_shown = ["S", "RT", "DT"] + (["RO", "DO"] if show_outliers else [])
+        evs_shown = ["S", "LT", "GT"] + (["LO", "GO"] if show_outliers else [])
         summary_parts = []
         for ev in evs_shown:
             total = sum(counts[ev].values())
@@ -356,7 +360,6 @@ def make_histogram_stacked(by_day: dict, out_path: str,
                 summary_parts.append(f"{ev}={total}")
         summary = "   ".join(summary_parts)
 
-        # X-axis: hours with data for this day in normal color, others as "--:--" in grey
         hours_with_data = set()
         for ev in EVENTS:
             hours_with_data.update(counts[ev].keys())
@@ -371,7 +374,8 @@ def make_histogram_stacked(by_day: dict, out_path: str,
                 tick.set_color("#bbbbbb")
         ax.set_xlabel("Hour of day", fontsize=9)
 
-        ax.set_title(f"{date_str}   {summary}", fontsize=11, loc="left")
+        weekday = datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")
+        ax.set_title(f"{date_str} {weekday}   {summary}", fontsize=11, loc="left")
         ax.set_ylabel("Events", fontsize=9)
         ax.set_ylim(0, max(max_val, 1) * 1.25)
         ax.yaxis.get_major_locator().set_params(integer=True)
@@ -405,38 +409,43 @@ def print_summary(by_day: dict):
             continue
         hours = sorted(hours_with_data)
         print(f"\n{date_str}")
-        print(f"  {'Hour':>6}  {'S':>5}  {'RT':>6}  {'RO':>6}  {'DT':>6}  {'DO':>6}")
+        print(f"  {'Hour':>6}  {'S':>5}  {'LT':>6}  {'LO':>6}  {'GT':>6}  {'GO':>6}")
         print("  " + "-" * 40)
         for h in range(min(hours), max(hours) + 1):
             print(f"  {h:02d}:00"
                   f"  {counts['S'].get(h, 0):>5}"
-                  f"  {counts['RT'].get(h, 0):>6}"
-                  f"  {counts['RO'].get(h, 0):>6}"
-                  f"  {counts['DT'].get(h, 0):>6}"
-                  f"  {counts['DO'].get(h, 0):>6}")
+                  f"  {counts['LT'].get(h, 0):>6}"
+                  f"  {counts['LO'].get(h, 0):>6}"
+                  f"  {counts['GT'].get(h, 0):>6}"
+                  f"  {counts['GO'].get(h, 0):>6}")
     print()
+
+
+def default_out_path(log_path: str) -> str:
+    """Derive output path from input: log_xyz.txt -> log_xyz.png"""
+    base, _ = os.path.splitext(log_path)
+    return f"{base}.png"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Create ping event histogram from log")
     parser.add_argument("log", type=str, help="Log file to read")
     parser.add_argument("--out", "-o", type=str, default=None,
-                        help="Output PNG path (default: <log_dir>/histogram.png)")
-    parser.add_argument("--router", type=str, default="",
-                        help="Router IP to show in chart (e.g. 192.168.0.1)")
-    parser.add_argument("--dns", type=str, default="",
-                        help="DNS IP to show in chart (e.g. 8.8.8.8)")
+                        help="Output PNG path (default: <logfile>.png)")
+    parser.add_argument("--local", type=str, default="",
+                        help="Local router IP to show in chart")
+    parser.add_argument("--gateway", type=str, default="",
+                        help="ISP gateway IP to show in chart")
     parser.add_argument("--outliers", action="store_true", default=False,
-                        help="Also plot RO and DO outlier bars (default: hidden)")
+                        help="Also plot LO and GO outlier bars (default: hidden)")
     parser.add_argument("--mode", "-m", choices=["combined", "stacked", "split"],
                         default="stacked",
-                        help="stacked: one subplot per day, hours 0–23 aligned (default); "
+                        help="stacked: one subplot per day (default); "
                              "combined: all days in one row; "
                              "split: one PNG file per day")
     args = parser.parse_args()
 
     log_path = args.log
-    log_dir  = os.path.dirname(os.path.abspath(log_path))
 
     print(f"Reading log: {log_path}")
     by_day, first_ts, last_ts = parse_log(log_path)
@@ -446,19 +455,19 @@ def main():
 
     print_summary(by_day)
 
-    kwargs = dict(router=args.router, dns=args.dns, show_outliers=args.outliers,
+    kwargs = dict(local=args.local, gateway=args.gateway, show_outliers=args.outliers,
                   first_ts=first_ts, last_ts=last_ts)
 
     if args.mode == "split":
         for date_str, counts in by_day.items():
-            out_path = os.path.join(log_dir, f"histogram_{date_str}.png")
+            out_path = args.out or default_out_path(log_path)
             make_histogram(date_str, counts, out_path, **kwargs)
     elif args.mode == "stacked":
-        out_path = args.out or os.path.join(log_dir, "histogram.png")
+        out_path = args.out or default_out_path(log_path)
         make_histogram_stacked(by_day, out_path, **kwargs)
     else:
+        out_path = args.out or default_out_path(log_path)
         all_dates = sorted(by_day.keys())
-        out_path = args.out or os.path.join(log_dir, "histogram.png")
         if len(all_dates) == 1:
             make_histogram(all_dates[0], by_day[all_dates[0]], out_path, **kwargs)
         else:

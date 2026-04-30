@@ -2,13 +2,13 @@
 """
 Ping monitor:
   S  = system suspended (laptop sleep)          → red
-  RT = router timeout                            → purple
-  RO = router IQR outlier                        → pink
-  DT = DNS timeout                               → red
-  DO = DNS IQR outlier                           → orange
+  LT = local timeout    (router)                → purple
+  LO = local IQR outlier (router)               → pink
+  GT = gateway timeout  (ISP gateway)           → red
+  GO = gateway IQR outlier (ISP gateway)        → orange
 
-Priority: S > RT > RO > DT > DO  (logged per round; RO also logs DNS events)
-Usage: python3 ping_monitor.py [-t INTERVAL] [-l LOGFILE]
+Priority: S > LT > LO > GT > GO  (logged per round; LO also logs gateway events)
+Usage: python3 monitor.py [-t INTERVAL] [-l LOGFILE]
 """
 
 import argparse
@@ -34,33 +34,104 @@ RESET  = "\033[0m"
 
 EVENT_COLOR = {
     "S":  RED,
-    "RT": PURPLE,
-    "RO": PINK,
-    "DT": RED,
-    "DO": ORANGE,
+    "LT": PURPLE,
+    "LO": PINK,
+    "GT": RED,
+    "GO": ORANGE,
 }
-PRIORITY = {"RT": 5, "RO": 4, "DT": 3, "DO": 2}
+PRIORITY = {"LT": 5, "LO": 4, "GT": 3, "GO": 2}
 
 
-def detect_router() -> str | None:
+def get_local_subnet() -> tuple[int, int] | None:
+    """Return (network_addr, netmask) as ints for the default route interface."""
+    import ipaddress
     try:
-        if sys.platform == "darwin":          # macOS
+        if sys.platform == "darwin":
+            # Get default interface
             out = subprocess.check_output(["route", "-n", "get", "default"],
                                           text=True, timeout=3)
-            m = re.search(r"gateway:\s+([\d.]+)", out)
-        elif sys.platform.startswith("linux"): # Linux
+            iface_m = re.search(r"interface:\s+(\S+)", out)
+            if not iface_m:
+                return None
+            iface = iface_m.group(1)
+            # Get IP and netmask from ifconfig
+            out = subprocess.check_output(["ifconfig", iface], text=True, timeout=3)
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-fA-F]+)", out)
+            if not m:
+                return None
+            ip_addr = int(ipaddress.IPv4Address(m.group(1)))
+            netmask = int(m.group(2), 16)
+            return (ip_addr & netmask, netmask)
+        elif sys.platform.startswith("linux"):
             out = subprocess.check_output(["ip", "route", "show", "default"],
                                           text=True, timeout=3)
-            m = re.search(r"default via ([\d.]+)", out)
-        elif sys.platform == "win32":          # Windows
-            out = subprocess.check_output(["route", "print", "0.0.0.0"],
+            dev_m = re.search(r"dev (\S+)", out)
+            if not dev_m:
+                return None
+            dev = dev_m.group(1)
+            out = subprocess.check_output(["ip", "-4", "addr", "show", dev],
                                           text=True, timeout=3)
-            m = re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", out)
-        else:
-            return None
-        return m.group(1) if m else None
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", out)
+            if not m:
+                return None
+            net = ipaddress.IPv4Network(f"{m.group(1)}/{m.group(2)}", strict=False)
+            return (int(net.network_address), int(net.netmask))
+        return None
     except Exception:
         return None
+
+
+def detect_targets() -> tuple[str | None, str | None]:
+    """Detect local router and ISP gateway via traceroute + subnet info.
+
+    Returns (local_ip, gateway_ip). Local = last hop in local subnet,
+    gateway = first hop outside local subnet.
+    """
+    subnet = get_local_subnet()
+
+    def is_local(ip_str: str) -> bool:
+        if subnet is None:
+            return False
+        import ipaddress
+        ip_int = int(ipaddress.IPv4Address(ip_str))
+        net_addr, netmask = subnet
+        return (ip_int & netmask) == net_addr
+
+    try:
+        cmd = ["traceroute", "-n", "-m", "5", "-q", "1", "-w", "2", "8.8.8.8"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+        local_ip = None
+        gateway_ip = None
+
+        for line in result.stdout.splitlines():
+            m = re.match(r"\s*\d+\s+([\d.]+)\s", line)
+            if not m:
+                continue
+            hop = m.group(1)
+            if subnet and is_local(hop):
+                local_ip = hop  # keep updating — last local hop wins
+            elif gateway_ip is None:
+                if local_ip is None and subnet:
+                    # First hop is already outside local net — unlikely but handle it
+                    pass
+                gateway_ip = hop
+                if local_ip is not None:
+                    break  # got both
+
+        # Fallback: if no subnet info, hop 1 = local, hop 2 = gateway
+        if subnet is None:
+            hops = []
+            for line in result.stdout.splitlines():
+                m = re.match(r"\s*\d+\s+([\d.]+)\s", line)
+                if m:
+                    hops.append(m.group(1))
+            local_ip = hops[0] if len(hops) >= 1 else None
+            gateway_ip = hops[1] if len(hops) >= 2 else None
+
+        return local_ip, gateway_ip
+    except Exception:
+        return None, None
 
 
 def ping_host(host: str, timeout_s: int = 1) -> tuple[bool, float | None]:
@@ -115,30 +186,29 @@ def fmt_stats(avg: float, med: float, sd: float, n: int) -> str:
 
 
 def print_status(now: datetime, ping_count: int,
-                 router_ms: float | None, r_avg: float, r_med: float, r_sd: float, r_n: int,
-                 dns_ms: float | None,   d_avg: float, d_med: float, d_sd: float, d_n: int):
+                 local_ms: float | None, l_avg: float, l_med: float, l_sd: float, l_n: int,
+                 gw_ms: float | None,    g_avg: float, g_med: float, g_sd: float, g_n: int):
     ts = now.strftime("%Y-%m-%d %H:%M:%S")
-    r = f"{router_ms:6.1f}ms" if router_ms is not None else " TIMEOUT"
-    d = f"{dns_ms:6.1f}ms"    if dns_ms    is not None else " TIMEOUT"
-    r_stats = fmt_stats(r_avg, r_med, r_sd, r_n)
-    d_stats = fmt_stats(d_avg, d_med, d_sd, d_n)
+    l = f"{local_ms:6.1f}ms" if local_ms is not None else " TIMEOUT"
+    g = f"{gw_ms:6.1f}ms"    if gw_ms    is not None else " TIMEOUT"
+    l_stats = fmt_stats(l_avg, l_med, l_sd, l_n)
+    g_stats = fmt_stats(g_avg, g_med, g_sd, g_n)
     sys.stdout.write(
         f"\r{ts}  ping #{ping_count:>6}"
-        f"  router={r}  {r_stats}"
-        f"  dns={d}  {d_stats}   "
+        f"  local={l}  {l_stats}"
+        f"  gateway={g}  {g_stats}   "
     )
     sys.stdout.flush()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ping monitor — tracks router & DNS health")
+    parser = argparse.ArgumentParser(description="Ping monitor — tracks local router & ISP gateway health")
     parser.add_argument("-t", "--interval", type=float, default=1.0,
                         help="Ping interval in seconds (default: 1)")
-    default_router = detect_router() or "192.168.0.1"
-    parser.add_argument("--router", type=str, default=default_router,
-                        help=f"Router IP (default: auto-detected {default_router})")
-    parser.add_argument("--dns", type=str, default="8.8.8.8",
-                        help="DNS IP (default: 8.8.8.8)")
+    parser.add_argument("--local", type=str, default=None,
+                        help="Local router IP (default: auto-detected via traceroute)")
+    parser.add_argument("--gateway", type=str, default=None,
+                        help="ISP gateway IP (default: auto-detected via traceroute)")
     default_log = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     parser.add_argument("-l", "--log", type=str, default=default_log,
                         help="Log file (default: log_<timestamp>.txt)")
@@ -146,23 +216,42 @@ def main():
 
     interval   = args.interval
     log_path   = args.log
-    router     = args.router
-    dns        = args.dns
+
+    if args.local and args.gateway:
+        local = args.local
+        gateway = args.gateway
+    else:
+        print("Detecting targets via traceroute...")
+        detected_local, detected_gateway = detect_targets()
+        local = args.local or detected_local
+        gateway = args.gateway or detected_gateway
+        if local:
+            print(f"  local:   {local}")
+        if gateway:
+            print(f"  gateway: {gateway}")
+
+    if not local:
+        local = "192.168.0.1"
+        print(f"Could not detect local router, falling back to {local}")
+    if not gateway:
+        gateway = "8.8.8.8"
+        print(f"Could not detect ISP gateway, falling back to {gateway}")
+
     last_flush = time.time()
 
-    router_ping_freq: dict[int, int] = {}
-    dns_ping_freq:    dict[int, int] = {}
+    local_ping_freq:   dict[int, int] = {}
+    gateway_ping_freq: dict[int, int] = {}
 
     event_desc = {
         "S":  "system suspended",
-        "RT": f"router timeout        ({router})",
-        "RO": f"router IQR outlier    ({router})",
-        "DT": f"DNS timeout           ({dns})",
-        "DO": f"DNS IQR outlier       ({dns})",
+        "LT": f"local timeout         ({local})",
+        "LO": f"local IQR outlier     ({local})",
+        "GT": f"gateway timeout       ({gateway})",
+        "GO": f"gateway IQR outlier   ({gateway})",
     }
 
     print(f"Ping monitor  |  interval={interval}s  |  log={log_path}")
-    for k in ("S", "RT", "RO", "DT", "DO"):
+    for k in ("S", "LT", "LO", "GT", "GO"):
         print(f"  {k:2} = {event_desc[k]}")
     print("-" * 60)
 
@@ -209,68 +298,68 @@ def main():
             def _ping(host, key):
                 results[key] = ping_host(host)
             threads = [
-                threading.Thread(target=_ping, args=(router, "router"), daemon=True),
-                threading.Thread(target=_ping, args=(dns,    "dns"),    daemon=True),
+                threading.Thread(target=_ping, args=(local,   "local"),   daemon=True),
+                threading.Thread(target=_ping, args=(gateway, "gateway"), daemon=True),
             ]
             for t in threads: t.start()
             for t in threads: t.join()
 
-            router_ok, router_ms = results["router"]
-            dns_ok,    dns_ms    = results["dns"]
+            local_ok, local_ms = results["local"]
+            gw_ok,    gw_ms    = results["gateway"]
 
             # Update frequency dicts
-            if router_ok and router_ms is not None:
-                k = round(router_ms)
-                router_ping_freq[k] = router_ping_freq.get(k, 0) + 1
-            if dns_ok and dns_ms is not None:
-                k = round(dns_ms)
-                dns_ping_freq[k] = dns_ping_freq.get(k, 0) + 1
+            if local_ok and local_ms is not None:
+                k = round(local_ms)
+                local_ping_freq[k] = local_ping_freq.get(k, 0) + 1
+            if gw_ok and gw_ms is not None:
+                k = round(gw_ms)
+                gateway_ping_freq[k] = gateway_ping_freq.get(k, 0) + 1
 
             # Compute stats
-            if router_ping_freq:
-                r_avg, r_med, r_sd, r_q1, r_q3 = freq_stats(router_ping_freq)
-                r_n = sum(router_ping_freq.values())
+            if local_ping_freq:
+                l_avg, l_med, l_sd, l_q1, l_q3 = freq_stats(local_ping_freq)
+                l_n = sum(local_ping_freq.values())
             else:
-                r_avg = r_med = r_sd = r_q1 = r_q3 = 0.0
-                r_n = 0
+                l_avg = l_med = l_sd = l_q1 = l_q3 = 0.0
+                l_n = 0
 
-            if dns_ping_freq:
-                d_avg, d_med, d_sd, d_q1, d_q3 = freq_stats(dns_ping_freq)
-                d_n = sum(dns_ping_freq.values())
+            if gateway_ping_freq:
+                g_avg, g_med, g_sd, g_q1, g_q3 = freq_stats(gateway_ping_freq)
+                g_n = sum(gateway_ping_freq.values())
             else:
-                d_avg = d_med = d_sd = d_q1 = d_q3 = 0.0
-                d_n = 0
+                g_avg = g_med = g_sd = g_q1 = g_q3 = 0.0
+                g_n = 0
 
-            # Evaluate router and DNS events independently
-            router_event = None
-            if not router_ok:
-                router_event = "RT"
-            elif router_ms is not None and is_iqr_outlier(router_ms, r_q1, r_q3, r_n):
-                router_event = "RO"
+            # Evaluate local and gateway events independently
+            local_event = None
+            if not local_ok:
+                local_event = "LT"
+            elif local_ms is not None and is_iqr_outlier(local_ms, l_q1, l_q3, l_n):
+                local_event = "LO"
 
-            dns_event = None
-            if not dns_ok:
-                dns_event = "DT"
-            elif dns_ms is not None and is_iqr_outlier(dns_ms, d_q1, d_q3, d_n):
-                dns_event = "DO"
+            gw_event = None
+            if not gw_ok:
+                gw_event = "GT"
+            elif gw_ms is not None and is_iqr_outlier(gw_ms, g_q1, g_q3, g_n):
+                gw_event = "GO"
 
-            # Log: worst overall event; if RO, also log any DNS event separately
-            candidates = [e for e in (router_event, dns_event) if e]
+            # Log: worst overall event; if LO, also log any gateway event separately
+            candidates = [e for e in (local_event, gw_event) if e]
             if candidates:
                 worst = max(candidates, key=lambda e: PRIORITY[e])
-                extra_r = f"  ({router_ms:.1f}ms)" if router_event in ("RO",) else ""
-                extra_d = f"  ({dns_ms:.1f}ms)"    if dns_event    in ("DO",) else ""
+                extra_l = f"  ({local_ms:.1f}ms)" if local_event in ("LO",) else ""
+                extra_g = f"  ({gw_ms:.1f}ms)"    if gw_event    in ("GO",) else ""
 
-                if worst == router_event:
-                    log_event(ts_str, router_event, extra_r)
-                    if dns_event and router_event == "RO":
-                        log_event(ts_str, dns_event, extra_d)
+                if worst == local_event:
+                    log_event(ts_str, local_event, extra_l)
+                    if gw_event and local_event == "LO":
+                        log_event(ts_str, gw_event, extra_g)
                 else:
-                    log_event(ts_str, dns_event, extra_d)
+                    log_event(ts_str, gw_event, extra_g)
 
             print_status(now, ping_count,
-                         router_ms, r_avg, r_med, r_sd, r_n,
-                         dns_ms,    d_avg, d_med, d_sd, d_n)
+                         local_ms, l_avg, l_med, l_sd, l_n,
+                         gw_ms,    g_avg, g_med, g_sd, g_n)
 
             if time.time() - last_flush >= FLUSH_INTERVAL:
                 flush_log()
